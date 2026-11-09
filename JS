@@ -1,0 +1,391 @@
+// =============================
+// 既読スルー予報（リッチ版）
+// =============================
+
+// ===== 3回分のメッセージ =====
+// chance = 10回中、即レスが来る回数（好感度で上下する）
+const ROUNDS = [
+  {
+    guide: "STEP 1/3　まずは話しかけてみよう",
+    messages: [
+      { text: "今なにしてる？", chance: 5, reply: "家で漫画読んでた！そっちは？", stamp: "📖" },
+      { text: "ねえ", chance: 3, reply: "ん？どした？", stamp: "❓" },
+      { text: "この犬の動画見て笑った🐶", chance: 6, reply: "なにこれ笑 かわいすぎだろ", stamp: "🤣" },
+    ],
+  },
+  {
+    guide: "STEP 2/3　話題をふってみよう",
+    messages: [
+      { text: "UVERworldの新曲もう聴いた？", chance: 6, reply: "聴いた！！ずっとリピートしてるわ", stamp: "🔥" },
+      { text: "おすすめの漫画教えて！", chance: 5, reply: "今度貸すわ！絶対ハマるやつある", stamp: "👍" },
+      { text: "昨日の件なんだけど、私なりに考えてみて…（長文）", chance: 2, reply: "ちゃんと読んだよ。ありがとな", stamp: "🙏" },
+    ],
+  },
+  {
+    guide: "STEP 3/3　勝負の一通。誘う？告白する？",
+    messages: [
+      { text: "UVERworldのライブ、一緒に行かない？", chance: 5, reply: "マジで！？行きたい！チケット取ろう", stamp: "🙌", ending: "live" },
+      { text: "週末ひま？", chance: 4, reply: "土曜空いてる！どっか行こ", stamp: "👌", ending: "weekend" },
+      { text: "好きです！", confess: true },
+    ],
+  },
+];
+
+// ===== エンディング（全6種） =====
+const ENDINGS = {
+  couple:  { icon: "💑", title: "付き合えたEND",   text: "勇気を出してよかった。今日から恋人同士！" },
+  dumped:  { icon: "💔", title: "振られたEND",     text: "既読はついた。でも、恋は実らなかった…" },
+  live:    { icon: "🎸", title: "ライブデートEND", text: "UVERworldのライブに2人で行くことに！" },
+  weekend: { icon: "🎡", title: "週末デートEND",   text: "土曜日、2人で出かけることになった！" },
+  stamp:   { icon: "🤔", title: "スタンプだけEND", text: "OKなの？ダメなの？脈アリかは謎のまま。" },
+  nope:    { icon: "📵", title: "脈なしEND",       text: "返事は来なかった…また今度がんばろう。" },
+};
+
+// 反応ごとの好感度の増減
+const LOVE_POINT = { quick: 15, stamp: 5, kidoku: -10, midoku: -15 };
+
+// ===== HTMLの要素 =====
+const talk = document.getElementById("talk");
+const chips = document.getElementById("chips");
+const field = document.getElementById("field");
+const sendBtn = document.getElementById("sendBtn");
+const clockEl = document.getElementById("clock");
+const loveEl = document.getElementById("love");
+const loveFill = document.getElementById("loveFill");
+const loveBox = document.getElementById("loveBox");
+
+// ===== ゲームの状態 =====
+let round = 0;     // 今何回目か（0〜2）
+let love = 50;     // 好感度（0〜100）
+let minutes = 0;   // 物語の時刻（0時からの分数）
+
+// ===== 便利な関数 =====
+
+// 指定ミリ秒待つ
+function wait(ms) {
+  return new Promise(function (resolve) { setTimeout(resolve, ms); });
+}
+
+// 要素を作る
+function make(tag, className, text) {
+  const el = document.createElement(tag);
+  if (className) el.className = className;
+  if (text) el.textContent = text;
+  return el;
+}
+
+// 時刻を「21:03」の形にする
+function timeText() {
+  const h = Math.floor(minutes / 60) % 24;
+  const m = minutes % 60;
+  return h + ":" + String(m).padStart(2, "0");
+}
+
+// 時計を進める
+function addMinutes(min) {
+  minutes = minutes + min;
+  clockEl.textContent = timeText();
+}
+
+// 一番下までスクロール
+function scrollDown() {
+  talk.scrollTo({ top: talk.scrollHeight, behavior: "smooth" });
+}
+
+// ===== トークに追加する =====
+
+// 自分の吹き出し（あとで「既読」を入れる場所を返す）
+function addMy(text) {
+  const row = make("div", "row me");
+  const meta = make("div", "meta");
+  const read = make("div", "", "");
+  meta.appendChild(read);
+  meta.appendChild(make("div", "", timeText()));
+  row.appendChild(meta);
+  row.appendChild(make("div", "bubble", text));
+  talk.appendChild(row);
+  scrollDown();
+  return read;
+}
+
+// 相手の吹き出し（isStamp が true ならスタンプとして大きく表示）
+function addYou(text, isStamp) {
+  const row = make("div", "row you");
+  row.appendChild(make("div", "avatar", "ひ"));
+  row.appendChild(make("div", isStamp ? "stamp" : "bubble", text));
+  row.appendChild(make("div", "meta", timeText()));
+  talk.appendChild(row);
+  scrollDown();
+}
+
+// 「入力中…」（消すために要素を返す）
+function addTyping() {
+  const row = make("div", "row you");
+  row.appendChild(make("div", "avatar", "ひ"));
+  const bubble = make("div", "bubble typing");
+  bubble.innerHTML = "<span></span><span></span><span></span>";
+  row.appendChild(bubble);
+  talk.appendChild(row);
+  scrollDown();
+  return row;
+}
+
+// お知らせ（kind：step / jump / なし）
+function addSystem(text, kind) {
+  talk.appendChild(make("div", "system " + (kind || ""), text));
+  scrollDown();
+}
+
+// ===== 好感度 =====
+function changeLove(point) {
+  love = Math.min(100, Math.max(0, love + point));
+  loveEl.textContent = love;
+  loveFill.style.width = love + "%";
+
+  // 「+15」「-10」をふわっと浮かべる
+  const f = make("span", point > 0 ? "float plus" : "float minus", (point > 0 ? "+" : "") + point);
+  loveBox.appendChild(f);
+  setTimeout(function () { f.remove(); }, 1200);
+
+  // 下がったときは揺らす
+  if (point < 0) {
+    loveBox.classList.remove("shake");
+    void loveBox.offsetWidth; // アニメーションをリセット
+    loveBox.classList.add("shake");
+  }
+}
+
+// ===== ゲーム開始 =====
+function startGame() {
+  round = 0;
+  love = 50;
+  minutes = 21 * 60 + 3; // 夜9時3分スタート
+  loveEl.textContent = love;
+  loveFill.style.width = love + "%";
+  clockEl.textContent = timeText();
+  talk.innerHTML = "";
+  addSystem("今日");
+  document.getElementById("title").hidden = true;
+  document.getElementById("result").hidden = true;
+  startRound();
+}
+
+// ===== ラウンド開始 =====
+async function startRound() {
+  await wait(500);
+  const now = ROUNDS[round];
+  addSystem(now.guide, "step");
+
+  // 最後のラウンドは告白成功率を表示
+  if (round == 2) {
+    await wait(400);
+    addSystem("今の告白成功率：" + confessRate() * 10 + "%");
+  }
+
+  // 候補ボタンを作る
+  chips.innerHTML = "";
+  now.messages.forEach(function (msg) {
+    const btn = make("button", msg.confess ? "confess" : "", msg.confess ? "💌 " + msg.text : msg.text);
+    btn.addEventListener("click", function () { choose(msg); });
+    chips.appendChild(btn);
+  });
+}
+
+// ===== メッセージを選んだとき =====
+async function choose(msg) {
+  chips.querySelectorAll("button").forEach(function (b) { b.disabled = true; });
+
+  // 入力欄に1文字ずつ打ち込む
+  field.textContent = "";
+  field.classList.add("filled");
+  const letters = Array.from(msg.text);
+  for (let i = 0; i < letters.length; i++) {
+    field.textContent += letters[i];
+    await wait(40);
+  }
+  await wait(250);
+
+  // 送信ボタンを押す
+  sendBtn.classList.add("active");
+  await wait(200);
+  sendBtn.classList.remove("active");
+  field.textContent = "送るメッセージを選んでね";
+  field.classList.remove("filled");
+  chips.innerHTML = "";
+
+  addMinutes(Math.ceil(Math.random() * 3));
+  if (msg.confess) {
+    await confess(msg);
+  } else {
+    await send(msg);
+  }
+}
+
+// ===== 反応を決める =====
+function decide(msg) {
+  let chance = msg.chance;
+  if (love >= 70) chance = chance + 2; // 仲良しだと返事が来やすい
+  if (love <= 30) chance = chance - 2; // 冷めていると来にくい
+
+  const r = Math.ceil(Math.random() * 10); // 1〜10
+
+  if (r <= chance) return "quick";      // 即レス
+  if (r <= chance + 2) return "stamp";  // スタンプだけ
+  if (r == 10) return "midoku";         // 未読スルー
+  return "kidoku";                      // 既読スルー
+}
+
+// ===== 普通のメッセージを送る =====
+async function send(msg) {
+  const read = addMy(msg.text);
+  const result = decide(msg);
+
+  if (result == "quick") {
+    await wait(600);
+    read.textContent = "既読";
+    await wait(400);
+    const typing = addTyping();
+    await wait(1300);
+    typing.remove();
+    addMinutes(1);
+    addYou(msg.reply, false);
+  }
+
+  if (result == "stamp") {
+    await wait(1500);
+    read.textContent = "既読";
+    await wait(1500);
+    addMinutes(4);
+    addYou(msg.stamp, true);
+  }
+
+  if (result == "kidoku") {
+    await wait(1000);
+    read.textContent = "既読";
+    await wait(1800);
+    addMinutes(180);
+    addSystem("― 3時間後 ―", "jump");
+    await wait(700);
+    addSystem("既読のまま、返事は来なかった…");
+  }
+
+  if (result == "midoku") {
+    await wait(2200);
+    addMinutes(600);
+    addSystem("― 翌朝 ―", "jump");
+    await wait(700);
+    addSystem("まだ既読すらつかない…");
+  }
+
+  await wait(500);
+  changeLove(LOVE_POINT[result]);
+  await wait(1200);
+  next(msg, result);
+}
+
+// ===== 告白 =====
+
+// 告白の成功率（10段階）：好感度が高いほど成功しやすい
+function confessRate() {
+  return Math.min(9, Math.max(1, Math.round(love / 10)));
+}
+
+async function confess(msg) {
+  const read = addMy(msg.text);
+  const r = Math.ceil(Math.random() * 10);
+  const success = r <= confessRate();
+
+  await wait(1500);
+  read.textContent = "既読";
+  await wait(1200);
+  const typing = addTyping();
+  await wait(3000); // ドキドキの溜め
+  typing.remove();
+  addMinutes(5);
+
+  if (success) {
+    addYou("俺も好きだった。付き合おう", false);
+    await wait(600);
+    changeLove(30);
+  } else {
+    addYou("ごめん…これからも友達でいたい", false);
+    await wait(600);
+    changeLove(-30);
+  }
+  await wait(1500);
+  showEnding(success ? "couple" : "dumped");
+}
+
+// ===== 次へ =====
+function next(msg, result) {
+  if (round < 2) {
+    round = round + 1;
+    startRound();
+    return;
+  }
+  // 最後のラウンドの結果でエンディングを決める
+  if (result == "quick") showEnding(msg.ending);
+  else if (result == "stamp") showEnding("stamp");
+  else showEnding("nope");
+}
+
+// ===== エンディング図鑑（ブラウザに保存） =====
+function loadZukan() {
+  try {
+    return JSON.parse(localStorage.getItem("kidoku-zukan")) || [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveZukan(list) {
+  try {
+    localStorage.setItem("kidoku-zukan", JSON.stringify(list));
+  } catch (e) {
+    // 保存できない環境でもゲームは続ける
+  }
+}
+
+// タイトル画面の図鑑を表示
+function renderZukan() {
+  const list = loadZukan();
+  const grid = document.getElementById("zukanGrid");
+  grid.innerHTML = "";
+  Object.keys(ENDINGS).forEach(function (key) {
+    const open = list.includes(key);
+    const item = make("div", open ? "zukan-item" : "zukan-item locked");
+    item.appendChild(make("span", "z-icon", open ? ENDINGS[key].icon : "🔒"));
+    item.appendChild(make("span", "", open ? ENDINGS[key].title : "？？？"));
+    grid.appendChild(item);
+  });
+  document.getElementById("zukanCount").textContent = list.length;
+}
+
+// ===== エンディング表示 =====
+function showEnding(key) {
+  const end = ENDINGS[key];
+  const list = loadZukan();
+  const isNew = !list.includes(key);
+  if (isNew) {
+    list.push(key);
+    saveZukan(list);
+  }
+
+  document.getElementById("resultIcon").textContent = end.icon;
+  document.getElementById("resultTitle").textContent = end.title;
+  document.getElementById("resultText").textContent = end.text;
+  document.getElementById("resultLove").textContent = love;
+  document.getElementById("resultCount").textContent = list.length;
+  document.getElementById("resultNew").hidden = !isNew;
+  document.getElementById("result").hidden = false;
+}
+
+// ===== ボタン =====
+document.getElementById("startBtn").addEventListener("click", startGame);
+document.getElementById("retryBtn").addEventListener("click", startGame);
+document.getElementById("toTitleBtn").addEventListener("click", function () {
+  renderZukan();
+  document.getElementById("result").hidden = true;
+  document.getElementById("title").hidden = false;
+});
+
+renderZukan();
